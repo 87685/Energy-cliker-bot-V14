@@ -1,0 +1,1300 @@
+from keep_alive import keep_alive
+keep_alive()
+import sqlite3
+import logging
+import os
+from datetime import datetime
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+    PicklePersistence,
+    ConversationHandler
+)
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Конфигурация
+TOKEN = "7646768810:AAE2cjZHftbI8Xd8znr9-LdgY0K41BSlIvo"
+ADMIN_ID = 7807869147
+DATABASE = "bot_data.db"
+PERSIST_FILE = "bot_persist.pickle"
+CHANNEL_LINK = "https://t.me/EnergyClickerb"
+CHANNEL_ID = "@EnergyClickerb"
+REFERRAL_BONUS = 5000
+
+# Промокоды {код: {"тип": "⚡/💎", "значение": int}}
+PROMO_CODES = {}
+
+# Состояния для ConversationHandler
+(
+    AWAIT_PROMO, AWAIT_PROMO_TEXT, AWAIT_REWARD_TYPE, AWAIT_REWARD_VALUE, AWAIT_PROMO_DELETE,
+    AWAIT_CHANNEL_ACTION, AWAIT_CHANNEL_ADD, AWAIT_CHANNEL_DELETE, AWAIT_CHANNEL_MESSAGE
+) = range(9)
+
+# 30 уровней силы клика
+CLICK_POWER_LEVELS = {
+    1: {"power": 1, "cost": 0},
+    2: {"power": 2, "cost": 100},
+    3: {"power": 5, "cost": 300},
+    4: {"power": 10, "cost": 700},
+    5: {"power": 20, "cost": 1500},
+    6: {"power": 50, "cost": 4000},
+    7: {"power": 100, "cost": 10000},
+    8: {"power": 200, "cost": 25000},
+    9: {"power": 500, "cost": 70000},
+    10: {"power": 1000, "cost": 150000},
+    11: {"power": 2000, "cost": 300000},
+    12: {"power": 5000, "cost": 800000},
+    13: {"power": 10000, "cost": 1500000},
+    14: {"power": 20000, "cost": 3000000},
+    15: {"power": 50000, "cost": 8000000},
+    16: {"power": 100000, "cost": 15000000},
+    17: {"power": 200000, "cost": 30000000},
+    18: {"power": 500000, "cost": 80000000},
+    19: {"power": 1000000, "cost": 150000000},
+    20: {"power": 2000000, "cost": 300000000},
+    21: {"power": 5000000, "cost": 800000000},
+    22: {"power": 10000000, "cost": 1500000000},
+    23: {"power": 20000000, "cost": 3000000000},
+    24: {"power": 50000000, "cost": 8000000000},
+    25: {"power": 100000000, "cost": 15000000000},
+    26: {"power": 200000000, "cost": 30000000000},
+    27: {"power": 500000000, "cost": 80000000000},
+    28: {"power": 1000000000, "cost": 150000000000},
+    29: {"power": 2000000000, "cost": 300000000000},
+    30: {"power": 5000000000, "cost": 1000000000000}
+}
+
+# 10 уровней автокликера
+AUTO_CLICKER_LEVELS = {
+    0: {"power": 0, "cost": 0},
+    1: {"power": 5, "cost": 1000},
+    2: {"power": 15, "cost": 3000},
+    3: {"power": 30, "cost": 7000},
+    4: {"power": 50, "cost": 15000},
+    5: {"power": 100, "cost": 30000},
+    6: {"power": 200, "cost": 70000},
+    7: {"power": 500, "cost": 150000},
+    8: {"power": 1000, "cost": 300000},
+    9: {"power": 2000, "cost": 700000},
+    10: {"power": 5000, "cost": 1500000}
+}
+
+# Магазин энергии
+ENERGY_SHOP = {
+    "1": {"name": "⚡ Малый буст", "energy": 1000, "cost": 50},
+    "2": {"name": "⚡ Средний буст", "energy": 5000, "cost": 200},
+    "3": {"name": "⚡ Большой буст", "energy": 20000, "cost": 700}
+}
+
+# Магазин алмазов
+GEMS_SHOP = {
+    "1": {"name": "💎 Малый набор", "gems": 50, "cost": 1000},
+    "2": {"name": "💎 Средний набор", "gems": 250, "cost": 4000},
+    "3": {"name": "💎 Большой набор", "gems": 1000, "cost": 15000}
+}
+
+# Ежедневные задания (30 заданий)
+DAILY_TASKS = [
+    {"description": "Сделайте 50 кликов", "type": "clicks", "target": 50, "reward": {"type": "⚡", "value": 1000}},
+    {"description": "Соберите 5000 энергии", "type": "energy_collect", "target": 5000, "reward": {"type": "💎", "value": 10}},
+    {"description": "Улучшите силу клика 1 раз", "type": "upgrade_click", "target": 1, "reward": {"type": "⚡", "value": 2000}},
+    {"description": "Улучшите автокликер 1 раз", "type": "upgrade_auto", "target": 1, "reward": {"type": "💎", "value": 20}},
+    {"description": "Пригласите 1 друга", "type": "referral", "target": 1, "reward": {"type": "⚡", "value": 3000}},
+    {"description": "Сделайте 100 кликов", "type": "clicks", "target": 100, "reward": {"type": "⚡", "value": 5000}},
+    {"description": "Соберите 10000 энергии", "type": "energy_collect", "target": 10000, "reward": {"type": "💎", "value": 30}},
+    {"description": "Купите 1 товар в магазине", "type": "shop_purchase", "target": 1, "reward": {"type": "⚡", "value": 4000}},
+    {"description": "Достигните 5 уровня силы", "type": "click_level", "target": 5, "reward": {"type": "💎", "value": 40}},
+    {"description": "Сделайте 200 кликов", "type": "clicks", "target": 200, "reward": {"type": "⚡", "value": 8000}},
+    {"description": "Соберите 20000 энергии", "type": "energy_collect", "target": 20000, "reward": {"type": "💎", "value": 50}},
+    {"description": "Улучшите силу клика 2 раза", "type": "upgrade_click", "target": 2, "reward": {"type": "⚡", "value": 10000}},
+    {"description": "Улучшите автокликер 2 раза", "type": "upgrade_auto", "target": 2, "reward": {"type": "💎", "value": 60}},
+    {"description": "Пригласите 2 друзей", "type": "referral", "target": 2, "reward": {"type": "⚡", "value": 12000}},
+    {"description": "Сделайте 300 кликов", "type": "clicks", "target": 300, "reward": {"type": "⚡", "value": 15000}},
+    {"description": "Соберите 50000 энергии", "type": "energy_collect", "target": 50000, "reward": {"type": "💎", "value": 70}},
+    {"description": "Купите 3 товара в магазине", "type": "shop_purchase", "target": 3, "reward": {"type": "⚡", "value": 18000}},
+    {"description": "Достигните 10 уровня силы", "type": "click_level", "target": 10, "reward": {"type": "💎", "value": 80}},
+    {"description": "Сделайте 500 кликов", "type": "clicks", "target": 500, "reward": {"type": "⚡", "value": 25000}},
+    {"description": "Соберите 100000 энергии", "type": "energy_collect", "target": 100000, "reward": {"type": "💎", "value": 90}},
+    {"description": "Улучшите силу клика 3 раза", "type": "upgrade_click", "target": 3, "reward": {"type": "⚡", "value": 30000}},
+    {"description": "Улучшите автокликер 3 раза", "type": "upgrade_auto", "target": 3, "reward": {"type": "💎", "value": 100}},
+    {"description": "Пригласите 3 друзей", "type": "referral", "target": 3, "reward": {"type": "⚡", "value": 35000}},
+    {"description": "Сделайте 1000 кликов", "type": "clicks", "target": 1000, "reward": {"type": "⚡", "value": 50000}},
+    {"description": "Соберите 200000 энергии", "type": "energy_collect", "target": 200000, "reward": {"type": "💎", "value": 120}},
+    {"description": "Купите 5 товаров в магазине", "type": "shop_purchase", "target": 5, "reward": {"type": "⚡", "value": 60000}},
+    {"description": "Достигните 15 уровня силы", "type": "click_level", "target": 15, "reward": {"type": "💎", "value": 150}},
+    {"description": "Сделайте 2000 кликов", "type": "clicks", "target": 2000, "reward": {"type": "⚡", "value": 80000}},
+    {"description": "Соберите 500000 энергии", "type": "energy_collect", "target": 500000, "reward": {"type": "💎", "value": 200}},
+    {"description": "Достигните 20 уровня силы", "type": "click_level", "target": 20, "reward": {"type": "💎", "value": 300}}
+]
+
+def init_db():
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    
+    # Таблица пользователей
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            energy INTEGER DEFAULT 0,
+            click_power INTEGER DEFAULT 1,
+            total_clicks INTEGER DEFAULT 0,
+            is_subscribed BOOLEAN DEFAULT FALSE,
+            gems INTEGER DEFAULT 0,
+            auto_level INTEGER DEFAULT 0,
+            auto_power INTEGER DEFAULT 0,
+            referrer_id INTEGER DEFAULT NULL,
+            referrals_count INTEGER DEFAULT 0,
+            daily_task_index INTEGER DEFAULT 0,
+            daily_progress INTEGER DEFAULT 0,
+            daily_completed BOOLEAN DEFAULT FALSE,
+            last_daily_date TEXT
+        )
+    """)
+    
+    # Таблица рефералов
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS referrals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            referrer_id INTEGER,
+            referral_id INTEGER,
+            bonus_claimed BOOLEAN DEFAULT FALSE,
+            timestamp TEXT
+        )
+    """)
+    
+    # Таблица промокодов
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS promocodes (
+            code TEXT PRIMARY KEY,
+            reward_type TEXT,
+            reward_value INTEGER
+        )
+    """)
+    
+    # Таблица каналов для рассылки
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS channels (
+            chat_id TEXT PRIMARY KEY
+        )
+    """)
+    
+    # Добавляем основной канал по умолчанию
+    try:
+        cursor.execute("INSERT OR IGNORE INTO channels (chat_id) VALUES (?)", (CHANNEL_ID,))
+    except:
+        pass
+    
+    conn.commit()
+    conn.close()
+
+def get_user(user_id):
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    columns = [column[0] for column in cursor.description]
+    user = cursor.fetchone()
+    conn.close()
+    return dict(zip(columns, user)) if user else None
+
+def update_user(user_id, **kwargs):
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    
+    if not get_user(user_id):
+        cursor.execute("""
+            INSERT INTO users (
+                user_id, username, first_name, energy, click_power, 
+                total_clicks, is_subscribed, gems, auto_level, auto_power,
+                referrer_id, referrals_count, daily_task_index, daily_progress,
+                daily_completed, last_daily_date
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user_id,
+            kwargs.get('username'),
+            kwargs.get('first_name'),
+            kwargs.get('energy', 0),
+            kwargs.get('click_power', 1),
+            kwargs.get('total_clicks', 0),
+            kwargs.get('is_subscribed', False),
+            kwargs.get('gems', 0),
+            kwargs.get('auto_level', 0),
+            kwargs.get('auto_power', 0),
+            kwargs.get('referrer_id', None),
+            kwargs.get('referrals_count', 0),
+            kwargs.get('daily_task_index', 0),
+            kwargs.get('daily_progress', 0),
+            kwargs.get('daily_completed', False),
+            kwargs.get('last_daily_date', None)
+        ))
+    else:
+        valid_keys = ['username', 'first_name', 'energy', 'click_power', 'total_clicks', 
+                      'is_subscribed', 'gems', 'auto_level', 'auto_power', 
+                      'referrer_id', 'referrals_count', 'daily_task_index',
+                      'daily_progress', 'daily_completed', 'last_daily_date']
+        safe_kwargs = {k: v for k, v in kwargs.items() if k in valid_keys}
+        
+        if not safe_kwargs:
+            conn.close()
+            return
+            
+        set_clause = ", ".join([f"{key} = ?" for key in safe_kwargs.keys()])
+        values = list(safe_kwargs.values()) + [user_id]
+        cursor.execute(f"UPDATE users SET {set_clause} WHERE user_id = ?", values)
+    
+    conn.commit()
+    conn.close()
+
+def load_promo_codes():
+    global PROMO_CODES
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM promocodes")
+    PROMO_CODES = {}
+    for row in cursor.fetchall():
+        code, reward_type, reward_value = row
+        PROMO_CODES[code] = {"тип": reward_type, "значение": reward_value}
+    conn.close()
+
+# Функции для работы с каналами рассылки
+def get_channels():
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT chat_id FROM channels")
+    channels = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return channels
+
+def add_channel(chat_id):
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO channels (chat_id) VALUES (?)", (chat_id,))
+    conn.commit()
+    conn.close()
+
+def remove_channel(chat_id):
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM channels WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+async def check_subscription(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    try:
+        member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        return member.status in ['member', 'administrator', 'creator']
+    except Exception as e:
+        logger.error(f"Ошибка проверки подписки: {e}")
+        return False
+
+async def auto_clicker_job(context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, auto_power FROM users WHERE auto_power > 0")
+    users = cursor.fetchall()
+    
+    update_data = [(auto_power, user_id) for user_id, auto_power in users]
+    cursor.executemany("""
+        UPDATE users 
+        SET energy = energy + ? 
+        WHERE user_id = ?
+    """, update_data)
+    
+    conn.commit()
+    conn.close()
+
+async def show_subscription_required(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = "📢 Для использования бота необходимо подписаться на наш канал!"
+    keyboard = [
+        [InlineKeyboardButton("📢 Подписаться", url=CHANNEL_LINK)],
+        [InlineKeyboardButton("✅ Я подписался", callback_data="check_sub")]
+    ]
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, user_data: dict):
+    if not await check_subscription(update.effective_user.id, context):
+        await show_subscription_required(update, context)
+        return
+
+    current_level = next(
+        (level for level, data in CLICK_POWER_LEVELS.items() 
+         if data["power"] == user_data['click_power']), 1)
+    
+    next_level = current_level + 1 if current_level < 30 else None
+    next_cost = CLICK_POWER_LEVELS.get(next_level, {}).get("cost", "MAX")
+    
+    # Проверяем ежедневное задание
+    await check_daily_task(update.effective_user.id)
+    
+    text = (
+        f"👤 {user_data['first_name']}\n"
+        f"⚡ Энергия: {user_data['energy']:,}\n"
+        f"💎 Алмазы: {user_data['gems']:,}\n"
+        f"💪 Уровень: {current_level}/30\n"
+        f"🔥 Сила: {user_data['click_power']:,}\n"
+        f"🤖 Автокликер: {user_data['auto_power']:,}/мин\n"
+        f"👥 Рефералы: {user_data['referrals_count']:,}\n"
+    )
+    
+    if next_level:
+        text += f"🔜 След. уровень: {next_cost:,}⚡\n"
+    
+    keyboard = [
+        [InlineKeyboardButton("🖱 Кликнуть", callback_data="click"),
+         InlineKeyboardButton("💪 Улучшить", callback_data="upgrade")],
+        [InlineKeyboardButton("🤖 Автокликер", callback_data="autoclicker"),
+         InlineKeyboardButton("🛒 Магазин", callback_data="shop")],
+        [InlineKeyboardButton("📝 Задания", callback_data="daily_tasks"),
+         InlineKeyboardButton("👥 Рефералы", callback_data="referrals")],
+        [InlineKeyboardButton("⚙️ Промокод", callback_data="promo"),
+         InlineKeyboardButton("🏆 Топ", callback_data="top")],
+        [InlineKeyboardButton("ℹ Инфо", callback_data="info")]
+    ]
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    start_payload = context.args[0] if context.args else ""
+    
+    # Обработка реферальной ссылки
+    if start_payload.startswith("ref_"):
+        referrer_id = int(start_payload[4:])
+        if referrer_id != user.id:
+            conn = sqlite3.connect(DATABASE)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR IGNORE INTO referrals (referrer_id, referral_id, timestamp)
+                VALUES (?, ?, ?)
+            """, (referrer_id, user.id, str(datetime.now())))
+            cursor.execute("""
+                UPDATE users 
+                SET energy = energy + ?,
+                    referrals_count = referrals_count + 1
+                WHERE user_id = ?
+            """, (REFERRAL_BONUS, referrer_id))
+            conn.commit()
+            conn.close()
+            
+            # Обновляем прогресс ежедневных заданий для пригласившего
+            referrer_data = get_user(referrer_id)
+            if referrer_data and not referrer_data['daily_completed']:
+                task = DAILY_TASKS[referrer_data['daily_task_index']]
+                if task['type'] == "referral":
+                    update_user(
+                        referrer_id, 
+                        daily_progress=referrer_data['daily_progress'] + 1
+                    )
+    
+    # Обновляем данные пользователя
+    update_user(
+        user.id,
+        username=user.username,
+        first_name=user.first_name
+    )
+    
+    # Проверяем подписку
+    if await check_subscription(user.id, context):
+        update_user(user.id, is_subscribed=True)
+        await show_main_menu(update, context, get_user(user.id))
+    else:
+        await show_subscription_required(update, context)
+
+async def check_subscription_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if await check_subscription(query.from_user.id, context):
+        update_user(query.from_user.id, is_subscribed=True)
+        await query.edit_message_text("✅ Спасибо за подписку!")
+        await show_main_menu(update, context, get_user(query.from_user.id))
+    else:
+        await query.answer("❌ Вы ещё не подписались!", show_alert=True)
+        await show_subscription_required(update, context)
+
+async def handle_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not await check_subscription(query.from_user.id, context):
+        await show_subscription_required(update, context)
+        return
+    
+    user_data = get_user(query.from_user.id)
+    new_energy = user_data['energy'] + user_data['click_power']
+    total_clicks = user_data['total_clicks'] + 1
+    
+    # Обновляем прогресс ежедневных заданий
+    if not user_data['daily_completed']:
+        task = DAILY_TASKS[user_data['daily_task_index']]
+        if task['type'] == "clicks":
+            update_user(
+                query.from_user.id,
+                energy=new_energy,
+                total_clicks=total_clicks,
+                daily_progress=user_data['daily_progress'] + 1
+            )
+        elif task['type'] == "energy_collect":
+            update_user(
+                query.from_user.id,
+                energy=new_energy,
+                total_clicks=total_clicks,
+                daily_progress=user_data['daily_progress'] + user_data['click_power']
+            )
+        else:
+            update_user(
+                query.from_user.id,
+                energy=new_energy,
+                total_clicks=total_clicks
+            )
+    else:
+        update_user(
+            query.from_user.id,
+            energy=new_energy,
+            total_clicks=total_clicks
+        )
+    
+    await query.edit_message_text(
+        f"💥 +{user_data['click_power']:,}⚡\n"
+        f"🔋 Всего: {new_energy:,}",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🖱 Ещё клик", callback_data="click")],
+            [InlineKeyboardButton("🔙 Меню", callback_data="menu")]
+        ])
+    )
+
+async def upgrade_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not await check_subscription(query.from_user.id, context):
+        await show_subscription_required(update, context)
+        return
+    
+    user_data = get_user(query.from_user.id)
+    
+    current_level = next(
+        (level for level, data in CLICK_POWER_LEVELS.items() 
+         if data["power"] == user_data['click_power']), 1)
+    
+    if current_level >= 30:
+        await query.answer("🎉 Макс. уровень достигнут!", show_alert=True)
+        return
+    
+    next_level = current_level + 1
+    next_data = CLICK_POWER_LEVELS[next_level]
+    
+    if user_data['energy'] < next_data['cost']:
+        await query.answer(f"❌ Нужно {next_data['cost']:,}⚡", show_alert=True)
+        return
+    
+    # Обновляем прогресс ежедневных заданий
+    if not user_data['daily_completed']:
+        task = DAILY_TASKS[user_data['daily_task_index']]
+        if task['type'] == "upgrade_click":
+            update_user(
+                query.from_user.id,
+                energy=user_data['energy'] - next_data['cost'],
+                click_power=next_data['power'],
+                daily_progress=user_data['daily_progress'] + 1
+            )
+        elif task['type'] == "click_level":
+            update_user(
+                query.from_user.id,
+                energy=user_data['energy'] - next_data['cost'],
+                click_power=next_data['power'],
+                daily_progress=next_level
+            )
+        else:
+            update_user(
+                query.from_user.id,
+                energy=user_data['energy'] - next_data['cost'],
+                click_power=next_data['power']
+            )
+    else:
+        update_user(
+            query.from_user.id,
+            energy=user_data['energy'] - next_data['cost'],
+            click_power=next_data['power']
+        )
+    
+    await query.answer(f"✅ Ур. {next_level}! Сила: {next_data['power']:,}⚡", show_alert=True)
+    await show_main_menu(update, context, get_user(query.from_user.id))
+
+async def autoclicker_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not await check_subscription(query.from_user.id, context):
+        await show_subscription_required(update, context)
+        return
+    
+    user_data = get_user(query.from_user.id)
+    
+    text = f"🤖 Автокликер (уровень {user_data['auto_level']}/10)\n"
+    text += f"⚡ {user_data['auto_power']} энергии/мин\n\n"
+    
+    next_level = user_data['auto_level'] + 1 if user_data['auto_level'] < 10 else 10
+    if next_level <= 10:
+        next_cost = AUTO_CLICKER_LEVELS[next_level]["cost"]
+        text += f"След. уровень: +{AUTO_CLICKER_LEVELS[next_level]['power']}⚡/мин ({next_cost:,}💎)\n"
+    
+    keyboard = [
+        [InlineKeyboardButton(f"Улучшить ({next_cost:,}💎)", callback_data=f"upgrade_auto_{next_level}")] if next_level <= 10 else [],
+        [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
+    ]
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def upgrade_autoclicker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not await check_subscription(query.from_user.id, context):
+        await show_subscription_required(update, context)
+        return
+    
+    user_id = query.from_user.id
+    user_data = get_user(user_id)
+    
+    next_level = int(query.data.split("_")[-1])
+    if user_data['auto_level'] >= next_level:
+        await query.answer("❌ Уже улучшено!")
+        return
+    
+    cost = AUTO_CLICKER_LEVELS[next_level]["cost"]
+    if user_data['gems'] < cost:
+        await query.answer(f"❌ Нужно {cost:,}💎", show_alert=True)
+        return
+    
+    # Обновляем прогресс ежедневных заданий
+    if not user_data['daily_completed']:
+        task = DAILY_TASKS[user_data['daily_task_index']]
+        if task['type'] == "upgrade_auto":
+            update_user(
+                user_id,
+                auto_level=next_level,
+                auto_power=AUTO_CLICKER_LEVELS[next_level]["power"],
+                gems=user_data['gems'] - cost,
+                daily_progress=user_data['daily_progress'] + 1
+            )
+        else:
+            update_user(
+                user_id,
+                auto_level=next_level,
+                auto_power=AUTO_CLICKER_LEVELS[next_level]["power"],
+                gems=user_data['gems'] - cost
+            )
+    else:
+        update_user(
+            user_id,
+            auto_level=next_level,
+            auto_power=AUTO_CLICKER_LEVELS[next_level]["power"],
+            gems=user_data['gems'] - cost
+        )
+    
+    await query.answer(f"✅ Автокликер улучшен до {next_level} уровня!", show_alert=True)
+    await autoclicker_menu(update, context)
+
+async def shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        user_id = update.callback_query.from_user.id
+    else:
+        user_id = update.message.from_user.id
+    
+    if not await check_subscription(user_id, context):
+        await show_subscription_required(update, context)
+        return
+    
+    text = "🛒 Выберите магазин:"
+    keyboard = [
+        [InlineKeyboardButton("⚡ Энергия", callback_data="shop_energy"),
+         InlineKeyboardButton("💎 Алмазы", callback_data="shop_gems")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
+    ]
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def shop_energy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not await check_subscription(query.from_user.id, context):
+        await show_subscription_required(update, context)
+        return
+    
+    text = "⚡ Купить энергию:\n"
+    for item_id, item in ENERGY_SHOP.items():
+        text += f"\n{item['name']} - {item['energy']:,}⚡ ({item['cost']:,}💎)"
+    
+    keyboard = [
+        [InlineKeyboardButton(f"Купить {ENERGY_SHOP['1']['name']}", callback_data="buy_energy_1")],
+        [InlineKeyboardButton(f"Купить {ENERGY_SHOP['2']['name']}", callback_data="buy_energy_2")],
+        [InlineKeyboardButton(f"Купить {ENERGY_SHOP['3']['name']}", callback_data="buy_energy_3")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="shop")]
+    ]
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def shop_gems(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not await check_subscription(query.from_user.id, context):
+        await show_subscription_required(update, context)
+        return
+    
+    text = "💎 Купить алмазы:\n"
+    for item_id, item in GEMS_SHOP.items():
+        text += f"\n{item['name']} - {item['gems']:,}💎 ({item['cost']:,}⚡)"
+    
+    keyboard = [
+        [InlineKeyboardButton(f"Купить {GEMS_SHOP['1']['name']}", callback_data="buy_gems_1")],
+        [InlineKeyboardButton(f"Купить {GEMS_SHOP['2']['name']}", callback_data="buy_gems_2")],
+        [InlineKeyboardButton(f"Купить {GEMS_SHOP['3']['name']}", callback_data="buy_gems_3")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="shop")]
+    ]
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def buy_item(update: Update, context: ContextTypes.DEFAULT_TYPE, item_type: str, item_id: str):
+    query = update.callback_query
+    await query.answer()
+    
+    if not await check_subscription(query.from_user.id, context):
+        await show_subscription_required(update, context)
+        return
+    
+    user_data = get_user(query.from_user.id)
+    shop = ENERGY_SHOP if item_type == "energy" else GEMS_SHOP
+    item = shop[item_id]
+    
+    if item_type == "energy":
+        if user_data['gems'] < item['cost']:
+            await query.answer(f"❌ Не хватает {item['cost']:,}💎", show_alert=True)
+            return
+        
+        # Обновляем прогресс ежедневных заданий
+        if not user_data['daily_completed']:
+            task = DAILY_TASKS[user_data['daily_task_index']]
+            if task['type'] == "shop_purchase":
+                update_user(
+                    query.from_user.id,
+                    energy=user_data['energy'] + item['energy'],
+                    gems=user_data['gems'] - item['cost'],
+                    daily_progress=user_data['daily_progress'] + 1
+                )
+            else:
+                update_user(
+                    query.from_user.id,
+                    energy=user_data['energy'] + item['energy'],
+                    gems=user_data['gems'] - item['cost']
+                )
+        else:
+            update_user(
+                query.from_user.id,
+                energy=user_data['energy'] + item['energy'],
+                gems=user_data['gems'] - item['cost']
+            )
+        await query.answer(f"✅ Куплено {item['energy']:,}⚡", show_alert=True)
+        await shop_energy(update, context)
+    else:
+        if user_data['energy'] < item['cost']:
+            await query.answer(f"❌ Не хватает {item['cost']:,}⚡", show_alert=True)
+            return
+        
+        # Обновляем прогресс ежедневных заданий
+        if not user_data['daily_completed']:
+            task = DAILY_TASKS[user_data['daily_task_index']]
+            if task['type'] == "shop_purchase":
+                update_user(
+                    query.from_user.id,
+                    gems=user_data['gems'] + item['gems'],
+                    energy=user_data['energy'] - item['cost'],
+                    daily_progress=user_data['daily_progress'] + 1
+                )
+            else:
+                update_user(
+                    query.from_user.id,
+                    gems=user_data['gems'] + item['gems'],
+                    energy=user_data['energy'] - item['cost']
+                )
+        else:
+            update_user(
+                query.from_user.id,
+                gems=user_data['gems'] + item['gems'],
+                energy=user_data['energy'] - item['cost']
+            )
+        await query.answer(f"✅ Куплено {item['gems']:,}💎", show_alert=True)
+        await shop_gems(update, context)
+
+async def top_players(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        user_id = update.callback_query.from_user.id
+    else:
+        user_id = update.message.from_user.id
+    
+    if not await check_subscription(user_id, context):
+        await show_subscription_required(update, context)
+        return
+    
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT first_name, total_clicks FROM users ORDER BY total_clicks DESC LIMIT 10")
+    top = cursor.fetchall()
+    conn.close()
+    
+    text = "🏆 Топ игроков:\n\n"
+    text += "\n".join([f"{i+1}. {name}: {clicks:,} кликов" for i, (name, clicks) in enumerate(top)])
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="menu")]])
+        )
+    else:
+        await update.message.reply_text(text)
+
+async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        user_id = update.callback_query.from_user.id
+    else:
+        user_id = update.message.from_user.id
+    
+    if not await check_subscription(user_id, context):
+        await show_subscription_required(update, context)
+        return
+    
+    text = (
+        "ℹ Информация:\n\n"
+        "🔹 Основные команды:\n"
+        "/start - Начать игру\n"
+        "/shop - Магазины\n"
+        "/top - Топ игроков\n\n"
+        f"📢 Канал: {CHANNEL_ID}"
+    )
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="menu")]])
+        )
+    else:
+        await update.message.reply_text(text)
+
+async def referrals_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not await check_subscription(query.from_user.id, context):
+        await show_subscription_required(update, context)
+        return
+    
+    user_data = get_user(query.from_user.id)
+    bot_username = (await context.bot.get_me()).username
+    
+    text = f"👥 Реферальная система\n\n"
+    text += f"🔹 Приглашено: {user_data['referrals_count']}\n"
+    text += f"🔹 Бонус за реферала: {REFERRAL_BONUS:,}⚡\n\n"
+    text += f"Ваша реферальная ссылка:\n"
+    text += f"https://t.me/{bot_username}?start=ref_{query.from_user.id}\n\n"
+    text += f"Приглашайте друзей и получайте бонусы!"
+    
+    keyboard = [
+        [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
+    ]
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def promo_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_subscription(update.effective_user.id, context):
+        await show_subscription_required(update, context)
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("⚙️ Ввести промокод", callback_data="enter_promo")]
+    ]
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            "🎁 Система промокодов\nИспользуйте кнопку ниже:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await update.message.reply_text(
+            "🎁 Система промокодов\nИспользуйте кнопку ниже:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+async def handle_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("📝 Введите промокод:")
+    return AWAIT_PROMO
+
+async def apply_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_input = update.message.text.strip().upper()
+    load_promo_codes()
+    
+    if user_input in PROMO_CODES:
+        reward = PROMO_CODES[user_input]
+        user = get_user(update.effective_user.id)
+        
+        if reward["тип"] == "⚡":
+            update_user(user_id=update.effective_user.id, energy=user['energy'] + reward["значение"])
+            await update.message.reply_text(f"🎉 Получено: {reward['значение']}⚡")
+        else:
+            update_user(user_id=update.effective_user.id, gems=user['gems'] + reward["значение"])
+            await update.message.reply_text(f"🎉 Получено: {reward['значение']}💎")
+    else:
+        await update.message.reply_text("❌ Неверный промокод")
+    return ConversationHandler.END
+
+async def admin_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    load_promo_codes()
+    keyboard = [
+        [InlineKeyboardButton("✅ Добавить", callback_data="add_promo")],
+        [InlineKeyboardButton("❌ Удалить", callback_data="del_promo")]
+    ]
+    await update.message.reply_text(
+        f"🔧 Управление промокодами (всего: {len(PROMO_CODES)})\nВыберите действие:",
+        reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def promo_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "add_promo":
+        await query.edit_message_text("📝 Введите текст промокода (англ/цифры):")
+        return AWAIT_PROMO_TEXT
+    else:
+        await query.edit_message_text("🗑 Введите промокод для удаления:")
+        return AWAIT_PROMO_DELETE
+
+async def process_promo_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["promo_code"] = update.message.text.strip().upper()
+    keyboard = [
+        [InlineKeyboardButton("⚡ Энергия", callback_data="reward_energy")],
+        [InlineKeyboardButton("💎 Алмазы", callback_data="reward_gems")]
+    ]
+    await update.message.reply_text(
+        "Выберите тип награды:",
+        reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def process_reward_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["reward_type"] = "⚡" if query.data == "reward_energy" else "💎"
+    await query.edit_message_text("💰 Введите количество награды (число):")
+    return AWAIT_REWARD_VALUE
+
+async def save_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        value = int(update.message.text)
+        code = context.user_data["promo_code"]
+        r_type = context.user_data["reward_type"]
+        
+        # Сохраняем в БД
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO promocodes (code, reward_type, reward_value)
+            VALUES (?, ?, ?)
+        """, (code, r_type, value))
+        conn.commit()
+        conn.close()
+        
+        # Обновляем кеш
+        load_promo_codes()
+        
+        await update.message.reply_text(f"✅ Промокод «{code}» добавлен!")
+    except ValueError:
+        await update.message.reply_text("❌ Введите число!")
+    return ConversationHandler.END
+
+async def delete_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    code = update.message.text.strip().upper()
+    load_promo_codes()
+    
+    if code in PROMO_CODES:
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM promocodes WHERE code = ?", (code,))
+        conn.commit()
+        conn.close()
+        
+        # Обновляем кеш
+        load_promo_codes()
+        
+        await update.message.reply_text(f"✅ Промокод «{code}» удалён!")
+    else:
+        await update.message.reply_text("❌ Промокод не найден")
+    return ConversationHandler.END
+
+async def infinity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    if len(context.args) < 2:
+        await update.message.reply_text("Использование:\n/infinity @user 1000\n/infinity всем 1000")
+        return
+    
+    try:
+        amount = int(context.args[1])
+        if context.args[0] == "всем":
+            conn = sqlite3.connect(DATABASE)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET energy = energy + ?", (amount,))
+            conn.commit()
+            conn.close()
+            await update.message.reply_text(f"✅ Всем выдано {amount:,}⚡")
+        else:
+            username = context.args[0].lstrip('@')
+            conn = sqlite3.connect(DATABASE)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET energy = energy + ? WHERE username = ?", (amount, username))
+            conn.commit()
+            conn.close()
+            await update.message.reply_text(f"✅ @{username} получил {amount:,}⚡")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+async def infinity_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    if len(context.args) < 2:
+        await update.message.reply_text("Использование:\n/infinityV2 @user 100\n/infinityV2 всем 1000")
+        return
+    
+    try:
+        amount = int(context.args[1])
+        if context.args[0] == "всем":
+            conn = sqlite3.connect(DATABASE)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET gems = gems + ?", (amount,))
+            conn.commit()
+            conn.close()
+            await update.message.reply_text(f"✅ Всем выдано {amount:,}💎")
+        else:
+            username = context.args[0].lstrip('@')
+            conn = sqlite3.connect(DATABASE)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET gems = gems + ? WHERE username = ?", (amount, username))
+            conn.commit()
+            conn.close()
+            await update.message.reply_text(f"✅ @{username} получил {amount:,}💎")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+async def chatbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Использование:\n/chatbot [текст]")
+        return
+
+    message = ' '.join(context.args)
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM users")
+    users = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    
+    success = 0
+    total = len(users)
+    for user_id in users:
+        try:
+            await context.bot.send_message(chat_id=user_id, text=message)
+            success += 1
+        except Exception as e:
+            logger.error(f"Ошибка отправки {user_id}: {e}")
+    
+    await update.message.reply_text(f"✅ Отправлено {success}/{total} пользователям")
+
+async def chatbotV2_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    channels = get_channels()
+    text = "📢 Управление рассылкой в чаты/каналы\n\n"
+    text += f"🔹 Текущие чаты для рассылки ({len(channels)}):\n"
+    text += "\n".join([f"• {chat}" for chat in channels])
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ Добавить чат", callback_data="add_channel")],
+        [InlineKeyboardButton("❌ Удалить чат", callback_data="remove_channel")],
+        [InlineKeyboardButton("⚙️ Отправить сообщение", callback_data="send_to_channels")]
+    ]
+    
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    return AWAIT_CHANNEL_ACTION
+
+async def handle_channel_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "add_channel":
+        await query.edit_message_text("➕ Введите @username или ID чата для добавления:")
+        return AWAIT_CHANNEL_ADD
+    elif query.data == "remove_channel":
+        await query.edit_message_text("➖ Введите @username или ID чата для удаления:")
+        return AWAIT_CHANNEL_DELETE
+    elif query.data == "send_to_channels":
+        await query.edit_message_text("📝 Введите сообщение для рассылки:")
+        return AWAIT_CHANNEL_MESSAGE
+
+async def add_channel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.text.strip()
+    add_channel(chat_id)
+    await update.message.reply_text(f"✅ Чат {chat_id} добавлен в список для рассылки!")
+    return ConversationHandler.END
+
+async def remove_channel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.text.strip()
+    remove_channel(chat_id)
+    await update.message.reply_text(f"✅ Чат {chat_id} удалён из списка для рассылки!")
+    return ConversationHandler.END
+
+async def send_to_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message.text
+    channels = get_channels()
+    success = 0
+    total = len(channels)
+    
+    for chat_id in channels:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=message)
+            success += 1
+        except Exception as e:
+            logger.error(f"Ошибка отправки в {chat_id}: {e}")
+    
+    await update.message.reply_text(f"✅ Отправлено в {success}/{total} чатов/каналов!")
+    return ConversationHandler.END
+
+# Функции для ежедневных заданий
+async def check_daily_task(user_id):
+    user = get_user(user_id)
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    if user['last_daily_date'] != today:
+        new_index = (user['daily_task_index'] + 1) % len(DAILY_TASKS)
+        update_user(
+            user_id,
+            daily_task_index=new_index,
+            daily_progress=0,
+            daily_completed=False,
+            last_daily_date=today
+        )
+        return True
+    return False
+
+async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    await check_daily_task(user_id)
+    user_data = get_user(user_id)
+    task = DAILY_TASKS[user_data['daily_task_index']]
+    
+    progress_text = ""
+    if task['type'] == "clicks":
+        progress_text = f"Прогресс: {user_data['daily_progress']}/{task['target']} кликов"
+    elif task['type'] == "energy_collect":
+        progress_text = f"Прогресс: {user_data['daily_progress']}/{task['target']} энергии"
+    elif task['type'] == "upgrade_click":
+        progress_text = f"Прогресс: {user_data['daily_progress']}/{task['target']} улучшений"
+    elif task['type'] == "upgrade_auto":
+        progress_text = f"Прогресс: {user_data['daily_progress']}/{task['target']} улучшений"
+    elif task['type'] == "referral":
+        progress_text = f"Прогресс: {user_data['daily_progress']}/{task['target']} приглашений"
+    elif task['type'] == "shop_purchase":
+        progress_text = f"Прогресс: {user_data['daily_progress']}/{task['target']} покупок"
+    elif task['type'] == "click_level":
+        current_level = next((lvl for lvl, data in CLICK_POWER_LEVELS.items() 
+                             if data["power"] == user_data['click_power']), 1)
+        progress_text = f"Текущий уровень: {current_level}/{task['target']}"
+    
+    text = (
+        f"📝 Ежедневное задание\n\n"
+        f"{task['description']}\n"
+        f"{progress_text}\n\n"
+        f"Награда: {task['reward']['value']}{task['reward']['type']}"
+    )
+    
+    keyboard = []
+    if not user_data['daily_completed'] and user_data['daily_progress'] >= task['target']:
+        keyboard.append([InlineKeyboardButton("🎁 Получить награду", callback_data="claim_daily")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="menu")])
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def claim_daily_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    user_data = get_user(user_id)
+    task = DAILY_TASKS[user_data['daily_task_index']]
+    
+    if user_data['daily_completed']:
+        await query.answer("Вы уже получили награду за это задание!", show_alert=True)
+        return
+    
+    if user_data['daily_progress'] < task['target']:
+        await query.answer("Задание еще не выполнено!", show_alert=True)
+        return
+    
+    # Выдаем награду
+    if task['reward']['type'] == "⚡":
+        update_user(user_id, energy=user_data['energy'] + task['reward']['value'], daily_completed=True)
+    else:
+        update_user(user_id, gems=user_data['gems'] + task['reward']['value'], daily_completed=True)
+    
+    await query.answer(f"Получено {task['reward']['value']}{task['reward']['type']}!", show_alert=True)
+    await show_daily_tasks(update, context)
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    if data == "click":
+        await handle_click(update, context)
+    elif data == "upgrade":
+        await upgrade_click(update, context)
+    elif data == "menu":
+        user_data = get_user(query.from_user.id)
+        await show_main_menu(update, context, user_data)
+    elif data == "autoclicker":
+        await autoclicker_menu(update, context)
+    elif data.startswith("upgrade_auto_"):
+        await upgrade_autoclicker(update, context)
+    elif data == "shop":
+        await shop(update, context)
+    elif data == "shop_energy":
+        await shop_energy(update, context)
+    elif data.startswith("buy_energy_"):
+        await buy_item(update, context, "energy", data.split("_")[-1])
+    elif data == "shop_gems":
+        await shop_gems(update, context)
+    elif data.startswith("buy_gems_"):
+        await buy_item(update, context, "gems", data.split("_")[-1])
+    elif data == "top":
+        await top_players(update, context)
+    elif data == "info":
+        await info(update, context)
+    elif data == "referrals":
+        await referrals_menu(update, context)
+    elif data == "check_sub":
+        await check_subscription_handler(update, context)
+    elif data == "promo":
+        await promo_menu(update, context)
+    elif data == "enter_promo":
+        await handle_promo(update, context)
+    elif data in ["add_promo", "del_promo"]:
+        await promo_action(update, context)
+    elif data in ["reward_energy", "reward_gems"]:
+        await process_reward_value(update, context)
+    elif data == "daily_tasks":
+        await show_daily_tasks(update, context)
+    elif data == "claim_daily":
+        await claim_daily_reward(update, context)
+
+def main():
+    init_db()
+    load_promo_codes()
+    persistence = PicklePersistence(filepath=PERSIST_FILE)
+    
+    # Создаем приложение с поддержкой JobQueue
+    application = Application.builder().token(TOKEN).persistence(persistence).build()
+    
+    # Обработчики команд
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("shop", shop))
+    application.add_handler(CommandHandler("top", top_players))
+    application.add_handler(CommandHandler("info", info))
+    application.add_handler(CommandHandler("infinity", infinity))
+    application.add_handler(CommandHandler("infinityV2", infinity_v2))
+    application.add_handler(CommandHandler("code", admin_promo))
+    application.add_handler(CommandHandler("chatbot", chatbot))
+    
+    # Обработчики кнопок
+    application.add_handler(CallbackQueryHandler(button_handler))
+    
+    # Обработчики промокодов
+    promo_conv_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(handle_promo, pattern="^enter_promo$"),
+            CommandHandler("code", admin_promo)
+        ],
+        states={
+            AWAIT_PROMO: [MessageHandler(filters.TEXT & ~filters.COMMAND, apply_promo)],
+            AWAIT_PROMO_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_promo_text)],
+            AWAIT_REWARD_TYPE: [CallbackQueryHandler(process_reward_value)],
+            AWAIT_REWARD_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_promo)],
+            AWAIT_PROMO_DELETE: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_promo)],
+        },
+        fallbacks=[],
+        per_message=True
+    )
+    application.add_handler(promo_conv_handler)
+    
+    # Обработчики управления каналами рассылки
+    channel_conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("chatbotV2", chatbotV2_start)
+        ],
+        states={
+            AWAIT_CHANNEL_ACTION: [CallbackQueryHandler(handle_channel_action)],
+            AWAIT_CHANNEL_ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_channel_handler)],
+            AWAIT_CHANNEL_DELETE: [MessageHandler(filters.TEXT & ~filters.COMMAND, remove_channel_handler)],
+            AWAIT_CHANNEL_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, send_to_channels)],
+        },
+        fallbacks=[],
+        per_message=True
+    )
+    application.add_handler(channel_conv_handler)
+    
+    # Инициализация JobQueue
+    job_queue = application.job_queue
+    if job_queue:
+        job_queue.run_repeating(auto_clicker_job, interval=60.0, first=10)
+        logger.info("JobQueue успешно инициализирована")
+    else:
+        logger.error("JobQueue не доступна! Убедитесь, что установлена библиотека 'python-telegram-bot[job-queue]'")
+    
+    # Запуск бота
+    application.run_polling()
+
+if __name__ == "__main__":
+    from keep_alive import keep_alive
+    keep_alive()  # запускаем веб-сервер
+    main()        # запускаем бота
